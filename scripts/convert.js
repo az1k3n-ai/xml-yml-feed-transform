@@ -108,10 +108,10 @@ function decodeHtml(str = '') {
 
 const stripHtml = (s = '') => String(s || '').replace(/<\/?[^>]+>/g, ' ');
 const collapseWs = (s = '') => String(s || '').replace(/\s+/g, ' ').trim();
-const cleanText = (s = '') => collapseWs(decodeBrokenUtf8(decodeHtml(s)));
+const cleanText = (s = '') => collapseWs(decodeHtml(s));
 
 function normalizeDescription(raw = '') {
-  const text = collapseWs(decodeBrokenUtf8(stripHtml(decodeHtml(raw))));
+  const text = collapseWs(stripHtml(decodeHtml(raw)));
   if (!text) return '';
   const max = 3000;
   if (text.length <= max) return text;
@@ -139,18 +139,26 @@ function ensureAbsolute(url, base) {
   }
 }
 
-function sanitizeImageUrl(url='') {
-  if (!url) return '';
+function sanitizeImageUrl(url = '') {
+  // Preserve as-is to keep Samsung rendering params like ?$ORIGIN_PNG$
+  return url || '';
+}
+
+function normalizePictureUrl(u = '') {
+  if (!u) return '';
+  // keep existing absolute URLs and query strings intact
   try {
-    const parsed = new URL(url);
-    if (!parsed.search) return parsed.toString();
-    const raw = parsed.search.slice(1);
-    if (/^\$[A-Z0-9_]+\$/.test(raw)) {
-      parsed.search = '';
+    const parsed = new URL(u);
+    // If URL has no extension and no query, and looks like Samsung CDN path, append $ORIGIN_PNG$
+    const hasExt = /\.(jpe?g|png|webp|gif)(\?|$)/i.test(parsed.pathname);
+    const looksSamsung = /images\.samsung\.com$/i.test(parsed.hostname) || /\/is\/image\//i.test(parsed.pathname);
+    if (!hasExt && !parsed.search && looksSamsung) {
+      parsed.search = '?$ORIGIN_PNG$';
     }
     return parsed.toString();
   } catch {
-    return url;
+    // For non-absolute (should already be resolved by fullImageUrl), just return as-is
+    return u;
   }
 }
 
@@ -325,7 +333,7 @@ function collectPictures(entry) {
     .map(cleanText)
     .map(fullImageUrl)
     .filter(Boolean)
-    .map(sanitizeImageUrl)
+    .map(normalizePictureUrl)
     .filter(Boolean);
 
   const seen = new Set();
