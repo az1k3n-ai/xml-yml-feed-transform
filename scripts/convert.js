@@ -29,6 +29,13 @@ const SHOP_NAME    = process.env.SHOP_NAME    || 'My Shop';
 const SHOP_COMPANY = process.env.SHOP_COMPANY || 'My Company';
 const SHOP_URL     = process.env.SHOP_URL     || 'https://example.com';
 const BASE_IMAGE_ORIGIN = process.env.BASE_IMAGE_ORIGIN || '';
+const SHOP_ORIGIN = (() => {
+  try {
+    return new URL(SHOP_URL).origin;
+  } catch {
+    return '';
+  }
+})();
 
 const ALLOWED_CURRENCIES = new Set(['RUR','RUB','KZT','USD','EUR','BYN','UAH']);
 function normCurrency(cur = 'KZT') {
@@ -122,12 +129,37 @@ function parsePriceToken(raw='') {
 
 function asArray(x) { return Array.isArray(x) ? x : (x ? [x] : []); }
 
+function ensureAbsolute(url, base) {
+  if (!base) return '';
+  try {
+    return new URL(url, base).toString();
+  } catch {
+    return '';
+  }
+}
+
 function fullImageUrl(s) {
   const u = trim1(s);
   if (!u) return '';
-  if (/^https?:\/\//i.test(u)) return u;
-  if (u.startsWith('/') && BASE_IMAGE_ORIGIN) return BASE_IMAGE_ORIGIN.replace(/\/+$/,'') + u;
-  return u; // fallback: как есть
+  if (/^https?:\/\//i.test(u)) {
+    try {
+      return new URL(u).toString();
+    } catch {
+      return '';
+    }
+  }
+  if (u.startsWith('//')) {
+    try {
+      return new URL(`https:${u}`).toString();
+    } catch {
+      return '';
+    }
+  }
+  const resolved =
+    ensureAbsolute(u, BASE_IMAGE_ORIGIN) ||
+    ensureAbsolute(u, SHOP_URL) ||
+    ensureAbsolute(u, SHOP_ORIGIN);
+  return resolved;
 }
 
 function pickCategory(entry) {
@@ -296,12 +328,27 @@ async function main() {
     const params = resolveParams(e);
     const shopSku = skuRaw || (itemGroupId ? `${itemGroupId}-${id}` : id);
 
-    return {
+    let offer = {
       id, name, description, url, pictures, brand, mpn, gtin,
       availability, condition, price, oldprice, currencyId, category,
       hasShipping, itemGroupId, params, shopSku
     };
-  });
+
+    const priceNum = Number(price);
+    if (!price || Number.isNaN(priceNum) || priceNum <= 0) {
+      const fallback = Number(oldprice);
+      if (fallback > 0) {
+        offer.price = String(oldprice);
+        offer.oldprice = '';
+      } else {
+        // пропускаем оффер с некорректной ценой
+        return null;
+      }
+    }
+    if (!offer.pictures.length) delete offer.pictures;
+
+    return offer;
+  }).filter(Boolean);
 
   // Категории (уникальные)
   const categoriesMap = new Map();
@@ -334,7 +381,14 @@ async function main() {
   out += `    <offers>\n`;
   for (const o of offers) {
     const cid = categoriesMap.get(o.category) || '1';
-    out += `      <offer id="${escapeXml(o.id)}" available="${o.availability}">\n`;
+    const attrParts = [
+      `id="${escapeXml(o.id)}"`,
+      `available="${o.availability}"`,
+    ];
+    if (o.itemGroupId) {
+      attrParts.push(`group_id="${escapeXml(o.itemGroupId)}"`);
+    }
+    out += `      <offer ${attrParts.join(' ')}>\n`;
     if (o.url)     out += `        <url>${escapeXml(o.url)}</url>\n`;
     if (o.price)   out += `        <price>${escapeXml(o.price)}</price>\n`;
     if (o.oldprice)out += `        <oldprice>${escapeXml(o.oldprice)}</oldprice>\n`;
@@ -349,10 +403,9 @@ async function main() {
     if (o.mpn)     out += `        <vendorCode>${escapeXml(o.mpn)}</vendorCode>\n`;
     if (o.gtin)    out += `        <barcode>${escapeXml(o.gtin)}</barcode>\n`;
     if (o.shopSku) out += `        <shop-sku>${escapeXml(o.shopSku)}</shop-sku>\n`;
-    if (o.itemGroupId) out += `        <group_id>${escapeXml(o.itemGroupId)}</group_id>\n`;
     if (o.name)    out += `        <name>${escapeXml(o.name)}</name>\n`;
     if (o.description) out += `        <description>${escapeXml(o.description)}</description>\n`;
-    if (o.condition) out += `        <condition>${escapeXml(o.condition)}</condition>\n`;
+    if (o.condition) out += `        <condition type="${escapeXml(o.condition)}"/>\n`;
     if (o.params?.length) {
       for (const param of o.params) {
         out += `        <param name="${escapeXml(param.name)}">${escapeXml(param.value)}</param>\n`;
