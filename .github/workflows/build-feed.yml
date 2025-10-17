@@ -1,0 +1,36 @@
+name: Build Yandex Feed
+on:
+  schedule:
+    - cron: '10 0,6,12,18 * * *'   # 4 раза/день (UTC)
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build feed
+        run: node scripts/convert.js "$GOOGLE_FEED_URL" > public/yandex.yml
+        env:
+          GOOGLE_FEED_URL: ${{ secrets.GOOGLE_FEED_URL }}
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./public
+          force_orphan: true
