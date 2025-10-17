@@ -1,16 +1,23 @@
 name: Build Yandex Feed
+
 on:
   schedule:
-    - cron: '10 0,6,12,18 * * *'   # 4 раза/день (UTC)
-  workflow_dispatch: {}
+    - cron: '0 */6 * * *'   # каждые 6 часов (UTC)
+  workflow_dispatch: {}      # запуск вручную из вкладки Actions
+  push:
+    branches: [ main ]       # чтобы срабатывало при обновлении скрипта
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write        # нужно для деплоя в gh-pages
       pages: write
       id-token: write
+    concurrency:
+      group: yandex-feed     # <— не даёт наложиться запускам
+      cancel-in-progress: true
+
     steps:
       - uses: actions/checkout@v4
 
@@ -26,6 +33,10 @@ jobs:
         run: node scripts/convert.js "$GOOGLE_FEED_URL" > public/yandex.yml
         env:
           GOOGLE_FEED_URL: ${{ secrets.GOOGLE_FEED_URL }}
+          SHOP_NAME: "Samsung KZ"
+          SHOP_COMPANY: "Samsung"
+          SHOP_URL: "https://shop.samsung.com/kz_ru"
+          BASE_IMAGE_ORIGIN: "https://images.samsung.com"
 
       - name: Deploy to gh-pages
         uses: peaceiris/actions-gh-pages@v3
