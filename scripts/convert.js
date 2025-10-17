@@ -51,6 +51,7 @@ function escapeXml(str='') {
 }
 const trim1 = s => String(s || '').trim();
 const one = v => Array.isArray(v) ? v[0] : v;
+const escapeRegex = str => String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const HTML_ENTITIES = {
   amp: '&',
@@ -138,6 +139,21 @@ function ensureAbsolute(url, base) {
   }
 }
 
+function sanitizeImageUrl(url='') {
+  if (!url) return '';
+  try {
+    const parsed = new URL(url);
+    if (!parsed.search) return parsed.toString();
+    const raw = parsed.search.slice(1);
+    if (/^\$[A-Z0-9_]+\$/.test(raw)) {
+      parsed.search = '';
+    }
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 function fullImageUrl(s) {
   const u = trim1(s);
   if (!u) return '';
@@ -166,6 +182,41 @@ function pickCategory(entry) {
   const a = cleanText(entry.product_type || '');
   const b = cleanText(entry.google_product_category || '');
   return a || b || 'Default';
+}
+
+function extractSegments(raw='') {
+  const value = cleanText(raw);
+  if (!value) return [];
+  return value.split(/>\s*/).map(part => cleanText(part)).filter(Boolean);
+}
+
+function deriveTypePrefix(entry, category) {
+  const GENERIC = new Set(['products', 'каталог']);
+  const candidates = [
+    one(entry.type || entry.product_type),
+    one(entry.google_product_category),
+    category,
+  ];
+  for (const candidate of candidates) {
+    const segments = extractSegments(candidate);
+    for (let i = segments.length - 1; i >= 0; i -= 1) {
+      const segment = segments[i];
+      if (!segment) continue;
+      if (GENERIC.has(segment.toLowerCase())) continue;
+      return segment;
+    }
+  }
+  return '';
+}
+
+function deriveModel(name, brand) {
+  const n = cleanText(name);
+  if (!n) return '';
+  const b = cleanText(brand);
+  if (!b) return n;
+  const pattern = new RegExp(`^${escapeRegex(b)}\\s*[—:-]?\\s*`, 'i');
+  const stripped = n.replace(pattern, '').trim();
+  return stripped || n;
 }
 
 function mapAvailability(av) {
@@ -234,7 +285,8 @@ function resolveParams(entry) {
 
   for (const { key, label } of PARAM_FIELDS) {
     const value = cleanText(one(entry[key]));
-    if (value) params.push({ name: label || key, value });
+    const name = cleanText(label || key);
+    if (value) params.push({ name, value });
   }
 
   const details = asArray(entry.product_detail || entry.product_details);
@@ -272,6 +324,8 @@ function collectPictures(entry) {
     })
     .map(cleanText)
     .map(fullImageUrl)
+    .filter(Boolean)
+    .map(sanitizeImageUrl)
     .filter(Boolean);
 
   const seen = new Set();
@@ -343,11 +397,14 @@ async function main() {
     const itemGroupId = cleanText(one(e.item_group_id));
     const params = resolveParams(e);
     const shopSku = skuRaw || (itemGroupId ? `${itemGroupId}-${id}` : id);
+    const typePrefix = deriveTypePrefix(e, category);
+    const model = deriveModel(name, brand);
+    const offerType = brand && model ? 'vendor.model' : '';
 
     let offer = {
       id, name, description, url, pictures, brand, mpn, gtin,
       availability, condition, price, oldprice, currencyId, category,
-      hasShipping, itemGroupId, params, shopSku
+      hasShipping, itemGroupId, params, shopSku, typePrefix, model, offerType
     };
 
     const priceNum = Number(price);
@@ -404,6 +461,9 @@ async function main() {
     if (o.itemGroupId) {
       attrParts.push(`group_id="${escapeXml(o.itemGroupId)}"`);
     }
+    if (o.offerType === 'vendor.model' && o.brand && o.model) {
+      attrParts.push(`type="vendor.model"`);
+    }
     out += `      <offer ${attrParts.join(' ')}>\n`;
     if (o.url)     out += `        <url>${escapeXml(o.url)}</url>\n`;
     if (o.price)   out += `        <price>${escapeXml(o.price)}</price>\n`;
@@ -419,6 +479,10 @@ async function main() {
     if (o.mpn)     out += `        <vendorCode>${escapeXml(o.mpn)}</vendorCode>\n`;
     if (o.gtin)    out += `        <barcode>${escapeXml(o.gtin)}</barcode>\n`;
     if (o.shopSku) out += `        <shop-sku>${escapeXml(o.shopSku)}</shop-sku>\n`;
+    if (o.offerType === 'vendor.model' && o.brand && o.model) {
+      if (o.typePrefix) out += `        <typePrefix>${escapeXml(o.typePrefix)}</typePrefix>\n`;
+      out += `        <model>${escapeXml(o.model)}</model>\n`;
+    }
     if (o.name)    out += `        <name>${escapeXml(o.name)}</name>\n`;
     if (o.description) out += `        <description>${escapeXml(o.description)}</description>\n`;
     if (o.condition?.type && o.condition?.quality) {
