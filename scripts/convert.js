@@ -177,9 +177,25 @@ function mapAvailability(av) {
 
 function mapCondition(cnd) {
   const x = trim1(cnd).toLowerCase();
-  if (x === 'new' || x === 'brand new') return 'new';
-  if (x === 'used' || x === 'refurbished') return x;
-  return 'new';
+  if (!x || x === 'new' || x === 'brand new') return null;
+
+  if (x === 'used' || x === 'second hand' || x === 'б/у') {
+    return { type: 'used', quality: 'good' };
+  }
+  if (x === 'like new' || x === 'as new' || x === 'open box') {
+    return { type: 'likenew', quality: 'excellent' };
+  }
+  if (x === 'refurbished' || x === 'renewed' || x === 'preowned') {
+    return { type: 'preowned', quality: 'refurbished' };
+  }
+  if (x === 'showcase' || x === 'demo' || x === 'display') {
+    return { type: 'showcasesample', quality: 'good' };
+  }
+  if (x === 'reduction' || x === 'discounted') {
+    return { type: 'reduction', quality: 'good' };
+  }
+
+  return null;
 }
 
 const PARAM_FIELDS = [
@@ -405,7 +421,11 @@ async function main() {
     if (o.shopSku) out += `        <shop-sku>${escapeXml(o.shopSku)}</shop-sku>\n`;
     if (o.name)    out += `        <name>${escapeXml(o.name)}</name>\n`;
     if (o.description) out += `        <description>${escapeXml(o.description)}</description>\n`;
-    if (o.condition) out += `        <condition type="${escapeXml(o.condition)}"/>\n`;
+    if (o.condition?.type && o.condition?.quality) {
+      out += `        <condition type="${escapeXml(o.condition.type)}">\n`;
+      out += `          <quality>${escapeXml(o.condition.quality)}</quality>\n`;
+      out += `        </condition>\n`;
+    }
     if (o.params?.length) {
       for (const param of o.params) {
         out += `        <param name="${escapeXml(param.name)}">${escapeXml(param.value)}</param>\n`;
