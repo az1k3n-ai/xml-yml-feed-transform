@@ -1,40 +1,50 @@
-// scripts/convert.js
-// Usage:
-//   node scripts/convert.js <google_feed_url> > public/yandex.yml
-//
-// Особенности v2:
-// - Поддержка Atom <feed>/<entry> с namespace g:* (стрип префиксов)
-// - Корректная обработка price/sale_price (KZT), availability, condition
-// - Картинки: нормализация абсолютного URL (если начинается с '/')
-// - Категории из product_type/google_product_category
-// - barcode из gtin, vendorCode из mpn
-// - oldprice -> из price, price -> из sale_price (если есть)
-// - Простые delivery-options (0 KZT, "1-3" дней) — при наличии shipping
-//
-// Переменные окружения (опционально):
-//   BASE_IMAGE_ORIGIN=https://images.samsung.com  # для относительных image_link
-//   SHOP_NAME="Samsung KZ" SHOP_COMPANY="Samsung" SHOP_URL="https://shop.samsung.com/kz_ru"
+/* scripts/convert.js
+   Usage:
+     node scripts/convert.js <google_feed_url> > public/yandex.yml
+*/
 
+const fs = require('fs');
 const fetch = require('node-fetch');
 const xml2js = require('xml2js');
 const { stripPrefix } = require('xml2js').processors;
 
+const USE_R2_IMAGES = process.env.USE_R2_IMAGES !== '0';
+
+const R2_INDEX = new Map();
+if (USE_R2_IMAGES) {
+  try {
+    const raw = fs.readFileSync('public/manifest-r2.json', 'utf8');
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      for (const entry of parsed) {
+        if (entry?.offerId && Array.isArray(entry.urls)) {
+          R2_INDEX.set(entry.offerId, entry.urls.filter(Boolean));
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`Could not read R2 manifest: ${err.message}`);
+  }
+}
+function r2PicsFor(offerId) {
+  if (!USE_R2_IMAGES) return [];
+  return R2_INDEX.get(offerId) || [];
+}
+
+// --- Входной фид ---
 const FEED_URL = process.argv[2] || process.env.GOOGLE_FEED_URL;
 if (!FEED_URL) {
   console.error('Usage: node scripts/convert.js <google_feed_url>');
   process.exit(2);
 }
 
+// --- Магазин/база ---
 const SHOP_NAME    = process.env.SHOP_NAME    || 'My Shop';
 const SHOP_COMPANY = process.env.SHOP_COMPANY || 'My Company';
 const SHOP_URL     = process.env.SHOP_URL     || 'https://example.com';
 const BASE_IMAGE_ORIGIN = process.env.BASE_IMAGE_ORIGIN || '';
 const SHOP_ORIGIN = (() => {
-  try {
-    return new URL(SHOP_URL).origin;
-  } catch {
-    return '';
-  }
+  try { return new URL(SHOP_URL).origin; } catch { return ''; }
 })();
 
 const ALLOWED_CURRENCIES = new Set(['RUR','RUB','KZT','USD','EUR','BYN','UAH']);
@@ -53,23 +63,16 @@ const trim1 = s => String(s || '').trim();
 const one = v => Array.isArray(v) ? v[0] : v;
 const escapeRegex = str => String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-const HTML_ENTITIES = {
-  amp: '&',
-  lt: '<',
-  gt: '>',
-  quot: '"',
-  apos: "'",
-  nbsp: ' ',
-};
+const HTML_ENTITIES = { amp:'&', lt:'<', gt:'>', quot:'"', apos:"'", nbsp:' ' };
 
 const CP1252_EXT = new Map([
-  [0x20ac, 0x80], [0x201a, 0x82], [0x0192, 0x83], [0x201e, 0x84],
-  [0x2026, 0x85], [0x2020, 0x86], [0x2021, 0x87], [0x02c6, 0x88],
-  [0x2030, 0x89], [0x0160, 0x8a], [0x2039, 0x8b], [0x0152, 0x8c],
-  [0x017d, 0x8e], [0x2018, 0x91], [0x2019, 0x92], [0x201c, 0x93],
-  [0x201d, 0x94], [0x2022, 0x95], [0x2013, 0x96], [0x2014, 0x97],
-  [0x02dc, 0x98], [0x2122, 0x99], [0x0161, 0x9a], [0x203a, 0x9b],
-  [0x0153, 0x9c], [0x017e, 0x9e], [0x0178, 0x9f],
+  [0x20ac,0x80],[0x201a,0x82],[0x0192,0x83],[0x201e,0x84],
+  [0x2026,0x85],[0x2020,0x86],[0x2021,0x87],[0x02c6,0x88],
+  [0x2030,0x89],[0x0160,0x8a],[0x2039,0x8b],[0x0152,0x8c],
+  [0x017d,0x8e],[0x2018,0x91],[0x2019,0x92],[0x201c,0x93],
+  [0x201d,0x94],[0x2022,0x95],[0x2013,0x96],[0x2014,0x97],
+  [0x02dc,0x98],[0x2122,0x99],[0x0161,0x9a],[0x203a,0x9b],
+  [0x0153,0x9c],[0x017e,0x9e],[0x0178,0x9f],
 ]);
 
 function decodeBrokenUtf8(str='') {
@@ -77,10 +80,7 @@ function decodeBrokenUtf8(str='') {
   const bytes = [];
   for (const ch of str) {
     const code = ch.codePointAt(0);
-    if (code <= 0xff) {
-      bytes.push(code);
-      continue;
-    }
+    if (code <= 0xff) { bytes.push(code); continue; }
     const mapped = CP1252_EXT.get(code);
     if (mapped == null) return str;
     bytes.push(mapped);
@@ -88,17 +88,15 @@ function decodeBrokenUtf8(str='') {
   try {
     const decoded = Buffer.from(bytes).toString('utf8');
     return /[А-Яа-яЁё]/.test(decoded) ? decoded : str;
-  } catch {
-    return str;
-  }
+  } catch { return str; }
 }
 
-function decodeHtml(str = '') {
+function decodeHtml(str='') {
   return String(str).replace(/&(#x?[0-9a-f]+|\w+);/gi, (m, entity) => {
     if (entity[0] === '#') {
-      const code = entity[1].toLowerCase() === 'x'
-        ? parseInt(entity.slice(2), 16)
-        : parseInt(entity.slice(1), 10);
+      const code = entity[1].toLowerCase()==='x'
+        ? parseInt(entity.slice(2),16)
+        : parseInt(entity.slice(1),10);
       return Number.isFinite(code) ? String.fromCodePoint(code) : m;
     }
     const key = entity.toLowerCase();
@@ -106,108 +104,71 @@ function decodeHtml(str = '') {
   });
 }
 
-const stripHtml = (s = '') => String(s || '').replace(/<\/?[^>]+>/g, ' ');
-const collapseWs = (s = '') => String(s || '').replace(/\s+/g, ' ').trim();
-const cleanText = (s = '') => collapseWs(decodeHtml(s));
+const stripHtml = (s='') => String(s||'').replace(/<\/?[^>]+>/g,' ');
+const collapseWs = (s='') => String(s||'').replace(/\s+/g,' ').trim();
+const cleanText = (s='') => collapseWs(decodeHtml(s));
 
-function normalizeDescription(raw = '') {
+function normalizeDescription(raw='') {
   const text = collapseWs(stripHtml(decodeHtml(raw)));
   if (!text) return '';
   const max = 3000;
   if (text.length <= max) return text;
-  const truncated = text.slice(0, max - 1).replace(/\s+\S*$/, '').trim();
-  return truncated ? `${truncated}…` : text.slice(0, max - 1);
+  const truncated = text.slice(0, max-1).replace(/\s+\S*$/, '').trim();
+  return truncated ? `${truncated}…` : text.slice(0, max-1);
 }
 
 function parsePriceToken(raw='') {
-  // "359990 KZT" | "359990" | "359,990 KZT"
   const m = String(raw).trim().match(/^([\d\s.,]+)\s*([A-Za-z]{3})?$/);
-  if (!m) return { amount: '', currency: 'KZT' };
+  if (!m) return { amount:'', currency:'KZT' };
   const amount = m[1].replace(/\s/g,'').replace(',','.');
   const currency = normCurrency(m[2] || 'KZT');
   return { amount, currency };
 }
 
-function asArray(x) { return Array.isArray(x) ? x : (x ? [x] : []); }
+function asArray(x){ return Array.isArray(x) ? x : (x ? [x] : []); }
 
-function ensureAbsolute(url, base) {
+function ensureAbsolute(url, base){
   if (!base) return '';
-  try {
-    return new URL(url, base).toString();
-  } catch {
-    return '';
-  }
+  try { return new URL(url, base).toString(); } catch { return ''; }
 }
 
-function sanitizeImageUrl(url = '') {
-  // Preserve as-is to keep Samsung rendering params like ?$ORIGIN_PNG$
-  return url || '';
-}
-
-function normalizePictureUrl(u = '') {
+// временная нормализация ссылок (для чернового фида), Samsung Scene7 допускаем макрос
+function normalizePictureUrl(u=''){
   if (!u) return '';
-  // keep existing absolute URLs and query strings intact
   try {
     const parsed = new URL(u);
-    // If URL has no extension and no query, and looks like Samsung CDN path, append $ORIGIN_PNG$
     const hasExt = /\.(jpe?g|png|webp|gif)(\?|$)/i.test(parsed.pathname);
     const looksSamsung = /images\.samsung\.com$/i.test(parsed.hostname) || /\/is\/image\//i.test(parsed.pathname);
-    if (!hasExt && !parsed.search && looksSamsung) {
-      parsed.search = '?$ORIGIN_PNG$';
-    }
+    if (!hasExt && !parsed.search && looksSamsung) parsed.search='?$ORIGIN_PNG$';
     return parsed.toString();
-  } catch {
-    // For non-absolute (should already be resolved by fullImageUrl), just return as-is
-    return u;
-  }
+  } catch { return u; }
 }
 
-function fullImageUrl(s) {
+function fullImageUrl(s){
   const u = trim1(s);
   if (!u) return '';
-  if (/^https?:\/\//i.test(u)) {
-    try {
-      return new URL(u).toString();
-    } catch {
-      return '';
-    }
-  }
-  if (u.startsWith('//')) {
-    try {
-      return new URL(`https:${u}`).toString();
-    } catch {
-      return '';
-    }
-  }
-  const resolved =
-    ensureAbsolute(u, BASE_IMAGE_ORIGIN) ||
-    ensureAbsolute(u, SHOP_URL) ||
-    ensureAbsolute(u, SHOP_ORIGIN);
-  return resolved;
+  if (/^https?:\/\//i.test(u)) { try { return new URL(u).toString(); } catch { return ''; } }
+  if (u.startsWith('//')) { try { return new URL(`https:${u}`).toString(); } catch { return ''; } }
+  return ensureAbsolute(u, BASE_IMAGE_ORIGIN) || ensureAbsolute(u, SHOP_URL) || ensureAbsolute(u, SHOP_ORIGIN);
 }
 
-function pickCategory(entry) {
+function pickCategory(entry){
   const a = cleanText(entry.product_type || '');
   const b = cleanText(entry.google_product_category || '');
   return a || b || 'Default';
 }
 
-function extractSegments(raw='') {
-  const value = cleanText(raw);
-  if (!value) return [];
+function extractSegments(raw=''){
+  const value = cleanText(raw); if (!value) return [];
   return value.split(/>\s*/).map(part => cleanText(part)).filter(Boolean);
 }
 
-function deriveTypePrefix(entry, category) {
-  const GENERIC = new Set(['products', 'каталог']);
-  const candidates = [
-    one(entry.type || entry.product_type),
-    one(entry.google_product_category),
-    category,
-  ];
+function deriveTypePrefix(entry, category){
+  const GENERIC = new Set(['products','каталог']);
+  const candidates = [ one(entry.type || entry.product_type), one(entry.google_product_category), category ];
   for (const candidate of candidates) {
     const segments = extractSegments(candidate);
-    for (let i = segments.length - 1; i >= 0; i -= 1) {
+    for (let i = segments.length-1; i>=0; i--){
       const segment = segments[i];
       if (!segment) continue;
       if (GENERIC.has(segment.toLowerCase())) continue;
@@ -217,104 +178,73 @@ function deriveTypePrefix(entry, category) {
   return '';
 }
 
-function deriveModel(name, brand) {
-  const n = cleanText(name);
-  if (!n) return '';
-  const b = cleanText(brand);
-  if (!b) return n;
+function deriveModel(name, brand){
+  const n = cleanText(name); if (!n) return '';
+  const b = cleanText(brand); if (!b) return n;
   const pattern = new RegExp(`^${escapeRegex(b)}\\s*[—:-]?\\s*`, 'i');
-  const stripped = n.replace(pattern, '').trim();
+  const stripped = n.replace(pattern,'').trim();
   return stripped || n;
 }
 
-function mapAvailability(av) {
+function mapAvailability(av){
   const x = trim1(av).toLowerCase();
-  if (x === 'in_stock' || x === 'preorder' || x === 'available for order') return 'true';
-  if (x === 'out_of_stock' || x === 'sold_out') return 'false';
+  if (x==='in_stock' || x==='preorder' || x==='available for order') return 'true';
+  if (x==='out_of_stock' || x==='sold_out') return 'false';
   return 'true';
 }
 
-function mapCondition(cnd) {
+function mapCondition(cnd){
   const x = trim1(cnd).toLowerCase();
-  if (!x || x === 'new' || x === 'brand new') return null;
-
-  if (x === 'used' || x === 'second hand' || x === 'б/у') {
-    return { type: 'used', quality: 'good' };
-  }
-  if (x === 'like new' || x === 'as new' || x === 'open box') {
-    return { type: 'likenew', quality: 'excellent' };
-  }
-  if (x === 'refurbished' || x === 'renewed' || x === 'preowned') {
-    return { type: 'preowned', quality: 'refurbished' };
-  }
-  if (x === 'showcase' || x === 'demo' || x === 'display') {
-    return { type: 'showcasesample', quality: 'good' };
-  }
-  if (x === 'reduction' || x === 'discounted') {
-    return { type: 'reduction', quality: 'good' };
-  }
-
+  if (!x || x==='new' || x==='brand new') return null;
+  if (x==='used' || x==='second hand' || x==='б/у')         return { type:'used',        quality:'good' };
+  if (x==='like new' || x==='as new' || x==='open box')     return { type:'likenew',     quality:'excellent' };
+  if (x==='refurbished' || x==='renewed' || x==='preowned') return { type:'preowned',    quality:'refurbished' };
+  if (x==='showcase' || x==='demo' || x==='display')        return { type:'showcasesample', quality:'good' };
+  if (x==='reduction' || x==='discounted')                  return { type:'reduction',   quality:'good' };
   return null;
 }
 
 const PARAM_FIELDS = [
-  { key: 'color', label: 'Цвет' },
-  { key: 'material', label: 'Материал' },
-  { key: 'size', label: 'Размер' },
-  { key: 'size_type', label: 'Тип размера' },
-  { key: 'size_system', label: 'Размерная сетка' },
-  { key: 'pattern', label: 'Принт' },
-  { key: 'gender', label: 'Пол' },
-  { key: 'age_group', label: 'Возраст' },
-  { key: 'capacity', label: 'Объем' },
-  { key: 'power', label: 'Мощность' },
-  { key: 'voltage', label: 'Напряжение' },
-  { key: 'width', label: 'Ширина' },
-  { key: 'height', label: 'Высота' },
-  { key: 'depth', label: 'Глубина' },
+  { key:'color',label:'Цвет' },{ key:'material',label:'Материал' },{ key:'size',label:'Размер' },
+  { key:'size_type',label:'Тип размера' },{ key:'size_system',label:'Размерная сетка' },{ key:'pattern',label:'Принт' },
+  { key:'gender',label:'Пол' },{ key:'age_group',label:'Возраст' },{ key:'capacity',label:'Объем' },
+  { key:'power',label:'Мощность' },{ key:'voltage',label:'Напряжение' },{ key:'width',label:'Ширина' },
+  { key:'height',label:'Высота' },{ key:'depth',label:'Глубина' },
 ];
+for (let i=0;i<=4;i++) PARAM_FIELDS.push({ key:`custom_label_${i}`, label:`Метка ${i}` });
 
-for (let i = 0; i <= 4; i += 1) {
-  PARAM_FIELDS.push({ key: `custom_label_${i}`, label: `Метка ${i}` });
-}
-
-function dedupeParams(list) {
+function dedupeParams(list){
   const seen = new Set();
-  return list.filter(({ name, value }) => {
-    const key = `${name}:::${value}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
+  return list.filter(({name,value}) => {
+    const k = `${name}:::${value}`;
+    if (seen.has(k)) return false;
+    seen.add(k); return true;
   });
 }
 
-function resolveParams(entry) {
+function resolveParams(entry){
   const params = [];
-
-  for (const { key, label } of PARAM_FIELDS) {
+  for (const {key,label} of PARAM_FIELDS) {
     const value = cleanText(one(entry[key]));
     const name = cleanText(label || key);
     if (value) params.push({ name, value });
   }
-
   const details = asArray(entry.product_detail || entry.product_details);
-  for (const detail of details) {
-    const name = cleanText(one(detail?.attribute_name) || one(detail?.name) || one(detail?.title));
-    const value = cleanText(one(detail?.attribute_value) || one(detail?.value) || one(detail?.description));
+  for (const d of details) {
+    const name = cleanText(one(d?.attribute_name) || one(d?.name) || one(d?.title));
+    const value = cleanText(one(d?.attribute_value) || one(d?.value) || one(d?.description));
     if (name && value) params.push({ name, value });
   }
-
   const explicitParams = asArray(entry.param || entry.parameter);
-  for (const param of explicitParams) {
-    const name = cleanText(param?.name || param?.$?.name || one(param?.name));
-    const value = cleanText(param?.value || one(param?.value) || param?._);
+  for (const p of explicitParams) {
+    const name = cleanText(p?.name || p?.$?.name || one(p?.name));
+    const value = cleanText(p?.value || one(p?.value) || p?._);
     if (name && value) params.push({ name, value });
   }
-
   return dedupeParams(params);
 }
 
-function collectPictures(entry) {
+function collectPictures(entry){
   const pool = [
     ...asArray(entry.image_link),
     ...asArray(entry['image link']),
@@ -322,7 +252,6 @@ function collectPictures(entry) {
     ...asArray(entry['additional_image_link']),
     ...asArray(entry.image_links),
   ];
-
   const urls = pool
     .flatMap(item => {
       if (!item) return [];
@@ -337,33 +266,24 @@ function collectPictures(entry) {
     .filter(Boolean);
 
   const seen = new Set();
-  return urls.filter(u => {
-    if (seen.has(u)) return false;
-    seen.add(u);
-    return true;
-  });
+  return urls.filter(u => { if (seen.has(u)) return false; seen.add(u); return true; });
 }
 
-async function main() {
+async function main(){
   const res = await fetch(FEED_URL);
   if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
   const xml = await res.text();
 
   const parser = new xml2js.Parser({
-    explicitArray: false,
-    mergeAttrs: true,
-    tagNameProcessors: [stripPrefix], // снимаем g:/atom префиксы
-    valueProcessors: [trim1],
-    attrValueProcessors: [trim1],
+    explicitArray:false, mergeAttrs:true,
+    tagNameProcessors:[stripPrefix],
+    valueProcessors:[trim1], attrValueProcessors:[trim1],
   });
-
   const root = await parser.parseStringPromise(xml);
 
-  // Atom feed → entries
   const entriesRaw = root?.feed?.entry;
   const entries = entriesRaw ? (Array.isArray(entriesRaw) ? entriesRaw : [entriesRaw]) : [];
 
-  // Соберём офферы
   const offers = entries.map(e => {
     const rawId = cleanText(one(e.id) || one(e.gid));
     const id   = rawId || Math.random().toString(36).slice(2,9);
@@ -378,28 +298,16 @@ async function main() {
     const skuRaw = cleanText(one(e.sku));
     const availability = mapAvailability(one(e.availability));
     const condition    = mapCondition(one(e.condition));
-    // цены
+
     const pricePrimary = parsePriceToken(one(e.price || ''));
     const sale = parsePriceToken(one(e.sale_price || ''));
-    // YML: price — текущая цена, oldprice — старая
     let price = pricePrimary.amount;
     let currencyId = pricePrimary.currency;
     let oldprice = '';
-
-    if (sale.amount) {
-      oldprice = pricePrimary.amount || '';
-      price = sale.amount;
-      currencyId = sale.currency || currencyId;
-    }
+    if (sale.amount) { oldprice = pricePrimary.amount || ''; price = sale.amount; currencyId = sale.currency || currencyId; }
     currencyId = 'KZT';
 
-    // категории
-    const category = pickCategory({
-      product_type: e.product_type,
-      google_product_category: e.google_product_category
-    });
-
-    // shipping → для демонстрации добавим <delivery-options><option cost="0" days="1-3"/>
+    const category = pickCategory({ product_type:e.product_type, google_product_category:e.google_product_category });
     const hasShipping = asArray(e.shipping).length > 0;
 
     const itemGroupId = cleanText(one(e.item_group_id));
@@ -418,20 +326,14 @@ async function main() {
     const priceNum = Number(price);
     if (!price || Number.isNaN(priceNum) || priceNum <= 0) {
       const fallback = Number(oldprice);
-      if (fallback > 0) {
-        offer.price = String(oldprice);
-        offer.oldprice = '';
-      } else {
-        // пропускаем оффер с некорректной ценой
-        return null;
-      }
+      if (fallback > 0) { offer.price = String(oldprice); offer.oldprice = ''; }
+      else return null;
     }
     if (!offer.pictures.length) delete offer.pictures;
 
     return offer;
   }).filter(Boolean);
 
-  // Категории (уникальные)
   const categoriesMap = new Map();
   let catSeq = 1;
   for (const o of offers) {
@@ -445,44 +347,29 @@ async function main() {
   out += `    <name>${escapeXml(SHOP_NAME)}</name>\n`;
   out += `    <company>${escapeXml(SHOP_COMPANY)}</company>\n`;
   out += `    <url>${escapeXml(SHOP_URL)}</url>\n`;
-
-  // Валюты
-  out += `    <currencies>\n`;
-  out += `      <currency id="KZT" rate="1"/>\n`;
-  out += `    </currencies>\n`;
-
-  // Категории
+  out += `    <currencies>\n      <currency id="KZT" rate="1"/>\n    </currencies>\n`;
   out += `    <categories>\n`;
-  for (const [name, cid] of categoriesMap) {
-    out += `      <category id="${cid}">${escapeXml(name)}</category>\n`;
-  }
+  for (const [name, cid] of categoriesMap) out += `      <category id="${cid}">${escapeXml(name)}</category>\n`;
   out += `    </categories>\n`;
-
-  // Офферы
   out += `    <offers>\n`;
+
   for (const o of offers) {
     const cid = categoriesMap.get(o.category) || '1';
-    const attrParts = [
-      `id="${escapeXml(o.id)}"`,
-      `available="${o.availability}"`,
-    ];
-    if (o.itemGroupId) {
-      attrParts.push(`group_id="${escapeXml(o.itemGroupId)}"`);
-    }
-    if (o.offerType === 'vendor.model' && o.brand && o.model) {
-      attrParts.push(`type="vendor.model"`);
-    }
-    out += `      <offer ${attrParts.join(' ')}>\n`;
-    if (o.url)     out += `        <url>${escapeXml(o.url)}</url>\n`;
-    if (o.price)   out += `        <price>${escapeXml(o.price)}</price>\n`;
-    if (o.oldprice)out += `        <oldprice>${escapeXml(o.oldprice)}</oldprice>\n`;
+    const attr = [`id="${escapeXml(o.id)}"`,`available="${o.availability}"`];
+    if (o.itemGroupId) attr.push(`group_id="${escapeXml(o.itemGroupId)}"`);
+    if (o.offerType === 'vendor.model' && o.brand && o.model) attr.push(`type="vendor.model"`);
+
+    out += `      <offer ${attr.join(' ')}>\n`;
+    if (o.url)      out += `        <url>${escapeXml(o.url)}</url>\n`;
+    if (o.price)    out += `        <price>${escapeXml(o.price)}</price>\n`;
+    if (o.oldprice) out += `        <oldprice>${escapeXml(o.oldprice)}</oldprice>\n`;
     out += `        <currencyId>KZT</currencyId>\n`;
     out += `        <categoryId>${cid}</categoryId>\n`;
-    if (o.pictures?.length) {
-      for (const pic of o.pictures) {
-        out += `        <picture>${escapeXml(pic)}</picture>\n`;
-      }
-    }
+
+    const r2 = r2PicsFor(o.id);
+    const pics = (r2.length ? r2 : (Array.isArray(o.pictures) ? o.pictures : []));
+    for (const pic of pics) out += `        <picture>${escapeXml(pic)}</picture>\n`;
+
     if (o.brand)   out += `        <vendor>${escapeXml(o.brand)}</vendor>\n`;
     if (o.mpn)     out += `        <vendorCode>${escapeXml(o.mpn)}</vendorCode>\n`;
     if (o.gtin)    out += `        <barcode>${escapeXml(o.gtin)}</barcode>\n`;
@@ -491,17 +378,15 @@ async function main() {
       if (o.typePrefix) out += `        <typePrefix>${escapeXml(o.typePrefix)}</typePrefix>\n`;
       out += `        <model>${escapeXml(o.model)}</model>\n`;
     }
-    if (o.name)    out += `        <name>${escapeXml(o.name)}</name>\n`;
-    if (o.description) out += `        <description>${escapeXml(o.description)}</description>\n`;
+    if (o.name)         out += `        <name>${escapeXml(o.name)}</name>\n`;
+    if (o.description)  out += `        <description>${escapeXml(o.description)}</description>\n`;
     if (o.condition?.type && o.condition?.quality) {
       out += `        <condition type="${escapeXml(o.condition.type)}">\n`;
       out += `          <quality>${escapeXml(o.condition.quality)}</quality>\n`;
       out += `        </condition>\n`;
     }
     if (o.params?.length) {
-      for (const param of o.params) {
-        out += `        <param name="${escapeXml(param.name)}">${escapeXml(param.value)}</param>\n`;
-      }
+      for (const p of o.params) out += `        <param name="${escapeXml(p.name)}">${escapeXml(p.value)}</param>\n`;
     }
     if (o.hasShipping) {
       out += `        <delivery-options>\n`;
@@ -510,8 +395,8 @@ async function main() {
     }
     out += `      </offer>\n`;
   }
-  out += `    </offers>\n  </shop>\n</yml_catalog>\n`;
 
+  out += `    </offers>\n  </shop>\n</yml_catalog>\n`;
   process.stdout.write(out);
 }
 

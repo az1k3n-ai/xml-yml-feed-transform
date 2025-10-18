@@ -1,4 +1,7 @@
 node_modules/
 public/yandex.yml
+public/yandex.tmp.yml
+images.json
 googleShoppingFeed.xml
 .github/.DS_Store
+.DS_Store

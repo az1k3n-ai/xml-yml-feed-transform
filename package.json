@@ -4,14 +4,19 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build:tmp": "USE_R2_IMAGES=0 node scripts/convert.js $GOOGLE_FEED_URL > public/yandex.tmp.yml",
+    "build:final": "node scripts/convert.js $GOOGLE_FEED_URL > public/yandex.yml",
+    "sync:r2": "node scripts/sync-images-to-r2.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "node-fetch": "^2.7.0",
+    "@aws-sdk/client-s3": "^3.600.0",
+    "node-fetch": "^2.6.9",
+    "sharp": "^0.33.4",
     "xml2js": "^0.6.2"
   }
 }

@@ -2,46 +2,110 @@ name: Build Yandex Feed
 
 on:
   schedule:
-    - cron: '0 */6 * * *'   # каждые 6 часов (UTC)
-  workflow_dispatch: {}      # запуск вручную из вкладки Actions
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
   push:
-    branches: [ main ]       # чтобы срабатывало при обновлении скрипта
+    branches: [ main ]
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write        # нужно для деплоя в gh-pages
-      pages: write
-      id-token: write
+      contents: write
     concurrency:
-      group: yandex-feed     # <— не даёт наложиться запускам
+      group: yandex-feed
       cancel-in-progress: true
 
-    steps:
-      - uses: actions/checkout@v4
+    env:
+      # Общие переменные магазина (уже у тебя есть)
+      SHOP_NAME: "Samsung KZ"
+      SHOP_COMPANY: "Samsung"
+      SHOP_URL: "https://shop.samsung.com/kz_ru"
+      BASE_IMAGE_ORIGIN: "https://images.samsung.com"
 
-      - name: Setup Node
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 18
 
-      - name: Install deps
+      - name: Install dependencies
         run: npm ci
 
-      - name: Build feed
-        run: node scripts/convert.js "$GOOGLE_FEED_URL" > public/yandex.yml
+      # 1) Черновой фид без R2
+      - name: Build temporary feed (no R2)
+        run: npm run build:tmp
         env:
           GOOGLE_FEED_URL: ${{ secrets.GOOGLE_FEED_URL }}
-          SHOP_NAME: "Samsung KZ"
-          SHOP_COMPANY: "Samsung"
-          SHOP_URL: "https://shop.samsung.com/kz_ru"
-          BASE_IMAGE_ORIGIN: "https://images.samsung.com"
+          USE_R2_IMAGES: "0"
 
+      # 2) Извлечение исходных картинок из чернового XML
+      - name: Extract image sources
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const xml2js = require('xml2js');
+
+          const feedPath = path.resolve('public/yandex.tmp.yml');
+          if (!fs.existsSync(feedPath)) {
+            throw new Error('Temporary feed not found at ' + feedPath);
+          }
+
+          const xml = fs.readFileSync(feedPath, 'utf8');
+          const parser = new xml2js.Parser({ explicitArray: true });
+
+          parser.parseString(xml, (err, data) => {
+            if (err) throw err;
+            const offers = ((data?.yml_catalog?.shop?.[0]?.offers?.[0]?.offer) || []);
+            const result = [];
+
+            for (const offer of offers) {
+              const attrs = offer.$ || {};
+              const offerId = attrs.id;
+              if (!offerId) continue;
+
+              const pics = Array.isArray(offer.picture) ? offer.picture : [];
+              const urls = Array.from(new Set(pics.map(u => String(u).trim()).filter(Boolean)));
+              if (!urls.length) continue;
+
+              result.push({ offerId, urls });
+            }
+
+            fs.writeFileSync('images.json', JSON.stringify(result, null, 2));
+          });
+          NODE
+
+      # 3) Синхронизация картинок в R2 (дедуп, ресайз, кэш) + публикация манифеста
+      - name: Sync images to R2
+        run: npm run sync:r2
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_R2_ACCESS_KEY_ID: ${{ secrets.CF_R2_ACCESS_KEY_ID }}
+          CF_R2_SECRET_ACCESS_KEY: ${{ secrets.CF_R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_PUBLIC_BASE: ${{ secrets.R2_PUBLIC_BASE }}
+
+      # 4) Финальный фид с подстановкой R2
+      - name: Build final feed (with R2)
+        run: npm run build:final
+        env:
+          GOOGLE_FEED_URL: ${{ secrets.GOOGLE_FEED_URL }}
+          USE_R2_IMAGES: "1"
+
+      # 5) Удаление временных артефактов
+      - name: Cleanup temp artifacts
+        run: |
+          rm -f images.json public/yandex.tmp.yml
+
+      # 6) Публикация на gh-pages
       - name: Deploy to gh-pages
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_branch: gh-pages
-          publish_dir: ./public
+          publish_dir: public
           force_orphan: true
